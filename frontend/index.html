@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Cold Chain Escrow Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: Arial; text-align: center; margin: 40px; }
+    #temp-chart { width: 80%; max-width: 600px; margin: 20px auto; }
+    .status { font-size: 1.5em; font-weight: bold; margin: 10px; }
+    .breach { color: red; }
+    .safe { color: green; }
+  </style>
+</head>
+<body>
+  <h1>🧬 Pharma Cold Chain Escrow</h1>
+  <p>Contract: <span id="contract-addr"></span></p>
+  <div class="status" id="trip-status">Trip not started</div>
+  <p>Last Temperature: <span id="last-temp">--</span> °C</p>
+  <p>Escrow Balance: <span id="balance">0</span> ETH</p>
+  <canvas id="temp-chart"></canvas>
+
+  <script>
+    // ---------- CONFIG ----------
+    const CONTRACT_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
+    // ⚠️ Only the array! No "abi": in front.
+    const CONTRACT_ABI = [
+      {
+        "inputs": [
+          { "internalType": "address", "name": "_seller", "type": "address" },
+          { "internalType": "address", "name": "_oracle", "type": "address" }
+        ],
+        "stateMutability": "nonpayable",
+        "type": "constructor"
+      },
+      {
+        "anonymous": false,
+        "inputs": [ { "indexed": false, "internalType": "address", "name": "buyer", "type": "address" } ],
+        "name": "PaymentRefunded",
+        "type": "event"
+      },
+      {
+        "anonymous": false,
+        "inputs": [ { "indexed": false, "internalType": "address", "name": "seller", "type": "address" } ],
+        "name": "PaymentReleased",
+        "type": "event"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          { "indexed": false, "internalType": "uint256", "name": "temp", "type": "uint256" },
+          { "indexed": false, "internalType": "bool", "name": "safe", "type": "bool" }
+        ],
+        "name": "TemperatureRecorded",
+        "type": "event"
+      },
+      { "anonymous": false, "inputs": [], "name": "TripStarted", "type": "event" },
+      {
+        "inputs": [],
+        "name": "MAX_TEMP",
+        "outputs": [ { "internalType": "uint256", "name": "", "type": "uint256" } ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [],
+        "name": "MIN_TEMP",
+        "outputs": [ { "internalType": "uint256", "name": "", "type": "uint256" } ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [],
+        "name": "buyer",
+        "outputs": [ { "internalType": "address", "name": "", "type": "address" } ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      { "inputs": [], "name": "endTrip", "outputs": [], "stateMutability": "nonpayable", "type": "function" },
+      {
+        "inputs": [],
+        "name": "getBalance",
+        "outputs": [ { "internalType": "uint256", "name": "", "type": "uint256" } ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [],
+        "name": "lastTemperature",
+        "outputs": [ { "internalType": "uint256", "name": "", "type": "uint256" } ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [],
+        "name": "oracle",
+        "outputs": [ { "internalType": "address", "name": "", "type": "address" } ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [ { "internalType": "uint256", "name": "_temp", "type": "uint256" } ],
+        "name": "recordTemperature",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [],
+        "name": "seller",
+        "outputs": [ { "internalType": "address", "name": "", "type": "address" } ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [],
+        "name": "startTrip",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function"
+      },
+      {
+        "inputs": [],
+        "name": "state",
+        "outputs": [ { "internalType": "enum ColdChainEscrow.TripState", "name": "", "type": "uint8" } ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [],
+        "name": "tempBreached",
+        "outputs": [ { "internalType": "bool", "name": "", "type": "bool" } ],
+        "stateMutability": "view",
+        "type": "function"
+      }
+    ];
+
+    // ---------- SETUP ----------
+    const provider = new ethers.providers.JsonRpcProvider("http://127.0.0.1:8545");
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
+
+    document.getElementById('contract-addr').textContent = CONTRACT_ADDRESS;
+
+    const ctx = document.getElementById('temp-chart').getContext('2d');
+    const chart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [
+          {
+            label: 'Temperature (°C)',
+            data: [],
+            borderColor: 'blue',
+            backgroundColor: 'rgba(0,0,255,0.1)',
+            fill: true
+          },
+          {
+            label: 'Min Safe Temp (2°C)',
+            data: [],
+            borderColor: 'green',
+            borderDash: [5,5],
+            pointRadius: 0,
+            fill: false
+          },
+          {
+            label: 'Max Safe Temp (8°C)',
+            data: [],
+            borderColor: 'red',
+            borderDash: [5,5],
+            pointRadius: 0,
+            fill: false
+          }
+        ]
+      },
+      options: {
+        scales: { y: { beginAtZero: false, min: -2, max: 12 } }
+      }
+    });
+
+    // ---------- LOAD CURRENT STATE ON OPEN ----------
+    async function loadCurrentState() {
+      try {
+        const stateNum = await contract.state();
+        const balance = await contract.getBalance();
+        document.getElementById('balance').textContent = ethers.utils.formatEther(balance);
+
+        if (stateNum === 0) {
+          document.getElementById('trip-status').textContent = 'Trip not started';
+          document.getElementById('trip-status').className = 'status';
+        } else if (stateNum === 1) {
+          document.getElementById('trip-status').textContent = '🚚 Trip In Progress';
+          document.getElementById('trip-status').className = 'status';
+        } else if (stateNum === 2) {
+          const breached = await contract.tempBreached();
+          if (breached) {
+            document.getElementById('trip-status').textContent = '❌ Payment Refunded to Buyer (Temp Breach)';
+            document.getElementById('trip-status').className = 'status breach';
+          } else {
+            document.getElementById('trip-status').textContent = '✅ Payment Released to Seller';
+            document.getElementById('trip-status').className = 'status safe';
+          }
+        }
+
+        // Load past temperature events to populate the chart
+        const filter = contract.filters.TemperatureRecorded();
+        const events = await contract.queryFilter(filter, 0, 'latest');
+        events.forEach(event => {
+          const temp = event.args.temp.toNumber();
+          chart.data.labels.push(chart.data.labels.length + 1);
+          chart.data.datasets[0].data.push(temp);
+          chart.data.datasets[1].data.push(2);
+          chart.data.datasets[2].data.push(8);
+        });
+        if (events.length > 0) {
+          document.getElementById('last-temp').textContent = events[events.length-1].args.temp.toNumber();
+        }
+        chart.update();
+      } catch (err) {
+        console.error("Failed to load contract state:", err);
+        document.getElementById('trip-status').textContent = 'Error loading contract. Check console.';
+      }
+    }
+
+    // ---------- LIVE EVENT LISTENERS ----------
+    contract.on("TemperatureRecorded", (temp, safe, event) => {
+      const tempNum = temp.toNumber();
+      document.getElementById('last-temp').textContent = tempNum;
+      document.getElementById('last-temp').className = safe ? 'safe' : 'breach';
+
+      chart.data.labels.push(chart.data.labels.length + 1);
+      chart.data.datasets[0].data.push(tempNum);
+      chart.data.datasets[1].data.push(2);
+      chart.data.datasets[2].data.push(8);
+      chart.update();
+    });
+
+    contract.on("TripStarted", () => {
+      document.getElementById('trip-status').textContent = '🚚 Trip In Progress';
+      document.getElementById('trip-status').className = 'status';
+      updateBalance();
+    });
+
+    contract.on("PaymentReleased", () => {
+      document.getElementById('trip-status').textContent = '✅ Payment Released to Seller';
+      document.getElementById('trip-status').className = 'status safe';
+      updateBalance();
+    });
+
+    contract.on("PaymentRefunded", () => {
+      document.getElementById('trip-status').textContent = '❌ Payment Refunded to Buyer (Temp Breach)';
+      document.getElementById('trip-status').className = 'status breach';
+      updateBalance();
+    });
+
+    async function updateBalance() {
+      const bal = await contract.getBalance();
+      document.getElementById('balance').textContent = ethers.utils.formatEther(bal);
+    }
+
+    // Kick everything off
+    loadCurrentState();
+  </script>
+</body>
+</html>
